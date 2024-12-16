@@ -1,0 +1,7 @@
+__pycache__
+*.pyc
+data/
+pyautogui_tutorials
+*_env
+
+*.json
