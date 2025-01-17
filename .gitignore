@@ -2,6 +2,7 @@ __pycache__
 *.pyc
 data/
 pyautogui_tutorials
+pyautogui_action_demo_clips
 *_env
 
 *.json
