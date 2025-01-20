@@ -4,6 +4,9 @@ import os
 import cv2
 import numpy as np
 import pyautogui
+import pygetwindow as gw
+import win32gui
+import win32con
 import json
 import uuid
 from datetime import datetime
@@ -305,6 +308,17 @@ def record_screen(out):
     out.release()
     cv2.destroyAllWindows()
 
+def minimize_current_window():
+    # Get the current active window
+    active_window = gw.getActiveWindow()
+    if active_window is not None:
+        hwnd = active_window._hWnd  # Get the handle of the window
+        # Minimize the window
+        win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
+        print(f"Minimized: {active_window.title}")
+    else:
+        print("No active window found.")
+
 # --------------------------------------------------
 # Main
 # --------------------------------------------------
@@ -313,7 +327,9 @@ def main():
     setup_directories()
 
     # Optionally minimize all windows (Windows OS)
-    pyautogui.hotkey('win', 'd')
+    # pyautogui.hotkey('win', 'd')
+    minimize_current_window()
+
     time.sleep(1)
 
     start_listeners()

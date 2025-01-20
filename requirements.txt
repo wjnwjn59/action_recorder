@@ -1,5 +1,7 @@
-pyautogui
 opencv-python
 Pillow
 pynput
+pywin32
+pyautogui
+PyGetWindow
 google-generativeai
