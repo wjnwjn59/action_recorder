@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
-from postprocess_annotations import post_process_actions, delete_unused_images
+from postprocess_annotations import post_process_actions, merge_typewrite_actions, delete_unused_images
 
 is_running = True
 mouse_listener = None
@@ -84,11 +84,9 @@ def on_click(x, y, button, pressed):
         # Record a single click (on press)
         action_record = {
             "action": "single_click",
-            "button": str(button),
-            "x_start": x,
-            "y_start": y,
-            "x_end": None,
-            "y_end": None,
+            "button": str(button).split(".")[1],
+            "x": x,
+            "y": y,
             "n_scrolls": None,
             "timestamp": time.time() - start_time,
             "before_frame": None,  # To be filled after screenshot
@@ -125,7 +123,7 @@ def on_click(x, y, button, pressed):
                 # Prepare drag action record
                 action_record = {
                     "action": "drag",
-                    "button": str(button),
+                    "button": str(button).split(".")[1],
                     "x_start": drag_start_position[0],
                     "y_start": drag_start_position[1],
                     "x_end": x,
@@ -167,8 +165,8 @@ def on_scroll(x, y, dx, dy):
     # Prepare scroll action record
     action_record = {
         "action": "vscroll",
-        "x_start": x,
-        "y_start": y,
+        "x": x,
+        "y": y,
         "dx": dx,
         "dy": dy,
         "count": 1,
@@ -250,10 +248,8 @@ def on_press_key(key):
             action_record = {
                 "action": "press",
                 "button": None,
-                "x_start": None,
-                "y_start": None,
-                "x_end": None,
-                "y_end": None,
+                "x": None,
+                "y": None,
                 "n_scrolls": None,
                 "value": [key_str],  # Use normalized key string
                 "timestamp": time.time() - start_time,
@@ -339,6 +335,7 @@ def main():
 
     # Finally, write the actions JSON
     post_processed_actions = post_process_actions(actions)
+    post_processed_actions = merge_typewrite_actions(post_processed_actions)
     with open(annotations_file_path, 'w', encoding='utf-8') as f:
         json.dump(post_processed_actions, f, indent=4)
     delete_unused_images(actions, post_processed_actions)

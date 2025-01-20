@@ -8,16 +8,13 @@ def is_modifier_key(key):
     return any(key.startswith(prefix) for prefix in HOTKEY_MODIFIER_PREFIXES)
 
 def is_alphanumeric(key):
-    if key.startswith("'") and key.endswith("'"):
-        char = key.strip("'")
-        return char.isalnum() 
-    elif key == " ":
+    if key == "Key.space":
         return True
-    return False
+    return key.isalnum() 
 
 def are_same_coordinates(action1, action2, delta=5):
-    is_x_same = abs(action1['x_start'] - action2['x_start']) <= delta
-    is_y_same = abs(action1['y_start'] - action2['y_start']) <= delta
+    is_x_same = abs(action1['x'] - action2['x']) <= delta
+    is_y_same = abs(action1['y'] - action2['y']) <= delta
     return is_x_same and is_y_same
 
 def same_scroll_direction(action1, action2):
@@ -64,10 +61,8 @@ def post_process_actions(actions):
                 hotkey_action = {
                     "action": "press",
                     "button": None,
-                    "x_start": None,
-                    "y_start": None,
-                    "x_end": None,
-                    "y_end": None,
+                    "x": None,
+                    "y": None,
                     "n_scrolls": None,
                     "value": hotkey_keys,
                     "before_frame": hotkey_before_frame,
@@ -80,10 +75,8 @@ def post_process_actions(actions):
                 hotkey_action = {
                     "action": "hotkey",
                     "button": None,
-                    "x_start": None,
-                    "y_start": None,
-                    "x_end": None,
-                    "y_end": None,
+                    "x": None,
+                    "y": None,
                     "n_scrolls": None,
                     "value": hotkey_keys,
                     "before_frame": hotkey_before_frame,
@@ -107,10 +100,8 @@ def post_process_actions(actions):
                 double_click_action = {
                     "action": "double_click",
                     "button": current_action['button'],
-                    "x_start": current_action['x_start'],
-                    "y_start": current_action['y_start'],
-                    "x_end": None,
-                    "y_end": None,
+                    "x": current_action['x'],
+                    "y": current_action['y'],
                     "n_scrolls": None,
                     "value": None,
                     "before_frame": current_action['before_frame'],
@@ -126,32 +117,39 @@ def post_process_actions(actions):
                 i += 2  # Skip the next action as it's merged
                 continue
 
-        # Rule 3: Merge single click followed by drag into a single drag
+        # Rule 3: Split drag into move and drag actions
         if (current_action['action'] == 'single_click') and (i + 1 < n):
             next_action = actions[i + 1]
             if (next_action['action'] == 'drag' and
-                are_same_coordinates(current_action, {'x_start': next_action['x_start'], 'y_start': next_action['y_start']}, delta=5) and
+                are_same_coordinates(current_action, {'x': next_action['x_start'], 'y': next_action['y_start']}, delta=5) and
                 time_difference(current_action, next_action) <= 2.0):
 
-                # Merge into drag
-                merged_drag_action = {
-                    "action": "drag",
-                    "button": next_action['button'],
-                    "x_start": next_action['x_start'],
-                    "y_start": next_action['y_start'],
-                    "x_end": next_action['x_end'],
-                    "y_end": next_action['y_end'],
+                # Create move action
+                move_action = {
+                    "action": "moveTo",
+                    "button": None,
+                    "x": current_action['x'],
+                    "y": current_action['y'],
                     "n_scrolls": None,
                     "value": None,
                     "before_frame": current_action['before_frame'],
+                    "after_frame": current_action['after_frame']
+                }
+                processed_actions.append(move_action)
+
+                # Create drag action
+                drag_action = {
+                    "action": "dragTo",
+                    "button": next_action['button'],
+                    "x": next_action['x_end'],
+                    "y": next_action['y_end'],
+                    "n_scrolls": None,
+                    "value": None,
+                    "before_frame": next_action['before_frame'],
                     "after_frame": next_action['after_frame']
                 }
-                processed_actions.append(merged_drag_action)
-                print(f"Merged actions at index {i} and {i+1} into drag.")
-
-                # Mark used images
-                used_image_paths.add(current_action['before_frame'])
-                used_image_paths.add(next_action['after_frame'])
+                processed_actions.append(drag_action)
+                print(f"Split actions at index {i} and {i+1} into move and drag.")
 
                 i += 2
                 continue
@@ -183,10 +181,8 @@ def post_process_actions(actions):
                 merged_scroll_action = {
                     "action": "vscroll",
                     "button": None,
-                    "x_start": None,
-                    "y_start": None,
-                    "x_end": None,
-                    "y_end": None,
+                    "x": None,
+                    "y": None,
                     "n_scrolls": scroll_count,  # Positive for up, negative for down
                     "value": None,
                     "before_frame": scroll_before_frame,
@@ -213,7 +209,9 @@ def post_process_actions(actions):
         # Rule 5: Merge consecutive alphanumerics into "type"
         if current_action['action'] == 'press' and is_alphanumeric(current_action['value'][0]):
             # Initialize typed string
-            typed_string = current_action['value'][0].strip("'")
+            typed_string = current_action['value'][0]
+            if typed_string == "Key.space":
+                typed_string = " "
             typed_before_frame = current_action['before_frame']
             typed_after_frame = current_action['after_frame']
             j = i +1
@@ -224,7 +222,11 @@ def post_process_actions(actions):
                     time_difference(current_action, next_action) <= 1.5):
 
                     # Append character to typed string
-                    typed_string += next_action['value'][0].strip("'")
+                    char = next_action['value'][0]
+                    if char == "Key.space":
+                        typed_string += " "
+                    else:
+                        typed_string += char
                     typed_after_frame = next_action['after_frame']
                     current_action = next_action
                     j +=1
@@ -233,12 +235,10 @@ def post_process_actions(actions):
 
             # Create typed string action
             typed_action = {
-                "action": "type",
+                "action": "typewrite",
                 "button": None,
-                "x_start": None,
-                "y_start": None,
-                "x_end": None,
-                "y_end": None,
+                "x": None,
+                "y": None,
                 "n_scrolls": None,
                 "value": [typed_string],
                 "before_frame": typed_before_frame,
@@ -262,6 +262,51 @@ def post_process_actions(actions):
         i +=1
 
     return processed_actions
+
+def merge_typewrite_actions(actions):
+    merged_actions = []
+    i = 0
+    n = len(actions)
+
+    while i < n:
+        current_action = actions[i]
+
+        # Check if the current action is a typewrite action
+        if current_action['action'] == 'typewrite':
+            # Initialize the merged value and set the start frame
+            merged_value = current_action['value'][0]
+            before_frame = current_action['before_frame']
+            after_frame = current_action['after_frame']
+            
+            j = i + 1
+
+            # Merge consecutive typewrite actions
+            while j < n and actions[j]['action'] == 'typewrite':
+                merged_value += actions[j]['value'][0]
+                after_frame = actions[j]['after_frame']  # Update the end frame to the latest
+                j += 1
+
+            # Create the merged typewrite action
+            merged_typewrite_action = {
+                "action": "typewrite",
+                "button": None,
+                "x": None,
+                "y": None,
+                "n_scrolls": None,
+                "value": [merged_value],
+                "before_frame": before_frame,
+                "after_frame": after_frame
+            }
+            merged_actions.append(merged_typewrite_action)
+
+            # Move to the next non-typewrite action
+            i = j
+        else:
+            # Append non-typewrite actions as is
+            merged_actions.append(current_action)
+            i += 1
+
+    return merged_actions
 
 def delete_unused_images(original_actions, processed_actions):
     # Collect all image paths from original actions
