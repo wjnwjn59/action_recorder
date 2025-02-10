@@ -1,64 +1,90 @@
 import json
 import os
+import string
+import shutil
+import uuid
+from pathlib import Path
 
-# Define the list of modifier key prefixes for hotkeys
-HOTKEY_MODIFIER_PREFIXES = ["Key.shift", "Key.ctrl", "Key.alt", "Key.cmd"]
+HOTKEY_MODIFIER_PREFIXES = ["shift", "ctrl", "alt", "cmd"]
+DISALLOWED_HOTKEY_KEYS = {"backspace", "enter", "return", "tab"}
+
+def normalize_key(key_str, shift_active=False):
+    special_mapping = {
+        "\u0008": "backspace",
+        "\u0009": "tab",
+        "\u000d": "enter",
+        "\u001b": "esc"
+    }
+    if key_str in special_mapping:
+        return special_mapping[key_str]
+    if len(key_str) == 1:
+        code = ord(key_str)
+        if 1 <= code <= 26:
+            letter = chr(code + 96)
+            return letter.upper() if shift_active else letter
+    if key_str.startswith("Key."):
+        return key_str[4:]
+    return key_str
 
 def is_modifier_key(key):
     return any(key.startswith(prefix) for prefix in HOTKEY_MODIFIER_PREFIXES)
 
-def is_alphanumeric(key):
-    if key == "Key.space":
+def is_typable_character(key):
+    if key == "space":
         return True
-    return key.isalnum() 
+    if len(key) == 1 and (key.isalnum() or key in string.punctuation):
+        return True
+    return False
 
 def are_same_coordinates(action1, action2, delta=5):
-    is_x_same = abs(action1['x'] - action2['x']) <= delta
-    is_y_same = abs(action1['y'] - action2['y']) <= delta
-    return is_x_same and is_y_same
-
-def same_scroll_direction(action1, action2):
-    is_x_same = action1['dx'] == action2['dx']
-    is_y_same = action1['dy'] == action2['dy']
-    return is_x_same and is_y_same
+    return abs(action1['x'] - action2['x']) <= delta and abs(action1['y'] - action2['y']) <= delta
 
 def time_difference(action1, action2):
     return action2['timestamp'] - action1['timestamp']
+
+# Helper function to copy an image file to a new file with a new UUID.
+def copy_image_file(rel_path):
+    src = os.path.join("data", rel_path)
+    p = Path(rel_path)
+    session_id = p.stem.split("_")[0]
+    new_uuid = uuid.uuid4().hex
+    new_filename = f"{session_id}_before_action_{new_uuid}{p.suffix}"
+    dst = p.parent / new_filename
+    dst_full = os.path.join("data", str(dst))
+    os.makedirs(os.path.join("data", str(p.parent)), exist_ok=True)
+    shutil.copyfile(src, dst_full)
+    return Path(dst).as_posix()
 
 def post_process_actions(actions):
     processed_actions = []
     i = 0
     n = len(actions)
-
-    # To track all image paths used in processed actions
-    used_image_paths = set()
-
+    
     while i < n:
         current_action = actions[i]
-
-        # Rule 1: Hotkey merging
-        if current_action['action'] == 'press' and is_modifier_key(current_action['value'][0]):
-            hotkey_keys = [current_action['value'][0]]  # Start with the modifier key
+        
+        # Rule 1: Hotkey merging (only for non-shift modifiers)
+        if (current_action['action'] == 'press' and 
+            is_modifier_key(current_action['value'][0]) and 
+            current_action['value'][0].lower() not in {"shift", "shift_l", "shift_r"}):
+            hotkey_keys = [current_action['value'][0]]
             hotkey_before_frame = current_action['before_frame']
             hotkey_after_frame = current_action['after_frame']
+            shift_active = "shift" in hotkey_keys
             j = i + 1
-
-            # Loop through subsequent actions to form the hotkey
             while j < n:
                 next_action = actions[j]
-                if (
-                    next_action['action'] == 'press' and
-                    time_difference(current_action, next_action) <= 1.0
-                ):
-                    hotkey_keys.append(next_action['value'][0])
+                if (next_action['action'] == 'press' and
+                    time_difference(current_action, next_action) <= 1.0 and
+                    next_action['value'][0] not in DISALLOWED_HOTKEY_KEYS):
+                    normalized = normalize_key(next_action['value'][0], shift_active)
+                    hotkey_keys.append(normalized)
                     hotkey_after_frame = next_action['after_frame']
                     j += 1
                 else:
                     break
-
-            # If only the modifier key exists and no subsequent actions within time window
             if len(hotkey_keys) == 1:
-                hotkey_action = {
+                processed_actions.append({
                     "action": "press",
                     "button": None,
                     "x": None,
@@ -67,12 +93,9 @@ def post_process_actions(actions):
                     "value": hotkey_keys,
                     "before_frame": hotkey_before_frame,
                     "after_frame": hotkey_after_frame
-                }
-                processed_actions.append(hotkey_action)
-                print(f"Processed single modifier key press at index {i}: {hotkey_keys}.")
+                })
             else:
-                # Create a combined hotkey action
-                hotkey_action = {
+                processed_actions.append({
                     "action": "hotkey",
                     "button": None,
                     "x": None,
@@ -81,185 +104,148 @@ def post_process_actions(actions):
                     "value": hotkey_keys,
                     "before_frame": hotkey_before_frame,
                     "after_frame": hotkey_after_frame
-                }
-                processed_actions.append(hotkey_action)
-                print(f"Merged actions from index {i} to {j-1} into hotkey: {hotkey_keys}.")
-
-            # Move to the next unprocessed action
+                })
             i = j
             continue
 
         # Rule 2: Merge two consecutive single clicks into a double click
-        if (current_action['action'] == 'single_click') and (i + 1 < n):
-            next_action = actions[i + 1]
+        if current_action['action'] == 'single_click' and (i + 1 < n):
+            next_action = actions[i+1]
             if (next_action['action'] == 'single_click' and
                 are_same_coordinates(current_action, next_action) and
                 time_difference(current_action, next_action) <= 2.0):
-
-                # Create double_click action
-                double_click_action = {
+                processed_actions.append({
                     "action": "double_click",
                     "button": current_action['button'],
                     "x": current_action['x'],
                     "y": current_action['y'],
                     "n_scrolls": None,
-                    "value": None,
+                    "value": [],
                     "before_frame": current_action['before_frame'],
                     "after_frame": next_action['after_frame']
-                }
-                processed_actions.append(double_click_action)
-                print(f"Merged actions at index {i} and {i+1} into double_click.")
-
-                # Mark used images
-                used_image_paths.add(current_action['before_frame'])
-                used_image_paths.add(next_action['after_frame'])
-
-                i += 2  # Skip the next action as it's merged
+                })
+                i += 2
                 continue
 
-        # Rule 3: Split drag into move and drag actions
-        if (current_action['action'] == 'single_click') and (i + 1 < n):
-            next_action = actions[i + 1]
-            if (next_action['action'] == 'drag' and
-                are_same_coordinates(current_action, {'x': next_action['x_start'], 'y': next_action['y_start']}, delta=5) and
-                time_difference(current_action, next_action) <= 2.0):
-
-                # Create move action
+        # Rule 3: Split drag into moveTo and dragTo actions.
+        if current_action['action'] == 'single_click' and (i + 1 < n):
+            next_action = actions[i+1]
+            if next_action['action'] == 'drag' and are_same_coordinates(current_action, {'x': next_action['x_start'], 'y': next_action['y_start']}):
                 move_action = {
                     "action": "moveTo",
                     "button": None,
                     "x": current_action['x'],
                     "y": current_action['y'],
                     "n_scrolls": None,
-                    "value": None,
+                    "value": [],
                     "before_frame": current_action['before_frame'],
                     "after_frame": current_action['after_frame']
                 }
                 processed_actions.append(move_action)
-
-                # Create drag action
+                new_drag_before = copy_image_file(move_action['after_frame'])
                 drag_action = {
                     "action": "dragTo",
                     "button": next_action['button'],
                     "x": next_action['x_end'],
                     "y": next_action['y_end'],
                     "n_scrolls": None,
-                    "value": None,
-                    "before_frame": next_action['before_frame'],
+                    "value": [],
+                    "before_frame": new_drag_before,
                     "after_frame": next_action['after_frame']
                 }
                 processed_actions.append(drag_action)
-                print(f"Split actions at index {i} and {i+1} into move and drag.")
-
                 i += 2
                 continue
 
-        # Rule 4: Merge consecutive scrolls with same direction and within 1.5s
+        # Rule 4: Merge consecutive vscroll events based on dy sign (ignore timestamps)
         if current_action['action'] == 'vscroll':
-            scroll_count = current_action['dy']
+            merged_dy = current_action.get('dy', 0)
             scroll_before_frame = current_action['before_frame']
             scroll_after_frame = current_action['after_frame']
             j = i + 1
-
             while j < n:
                 next_action = actions[j]
-                if (
-                    next_action['action'] == 'vscroll'
-                    and same_scroll_direction(current_action, next_action)
-                    and time_difference(current_action, next_action) <= 1.5
-                ):
-                    # Accumulate scrolls
-                    scroll_count += next_action['dy']  # Add the dy value (positive or negative)
-                    scroll_after_frame = next_action['after_frame']
-                    current_action = next_action
-                    j += 1
-                else:
-                    break
-
-            # If merged scrolls, create a new scroll action with the net scroll count
-            if abs(scroll_count) > 1:  # Check for multiple scrolls
-                merged_scroll_action = {
-                    "action": "vscroll",
-                    "button": None,
-                    "x": None,
-                    "y": None,
-                    "n_scrolls": scroll_count,  # Positive for up, negative for down
-                    "value": None,
-                    "before_frame": scroll_before_frame,
-                    "after_frame": scroll_after_frame,
-                }
-                processed_actions.append(merged_scroll_action)
-                print(
-                    f"Merged {abs(scroll_count)} scrolls {'up' if scroll_count > 0 else 'down'} starting at index {i} into a single scroll with count."
-                )
-
-                # Mark used images
-                used_image_paths.add(scroll_before_frame)
-                used_image_paths.add(scroll_after_frame)
-
-                i = j
-                continue
-
-            else:
-                # Single scroll, mark its images as used
-                used_image_paths.add(current_action['before_frame'])
-                used_image_paths.add(current_action['after_frame'])
-
-
-        # Rule 5: Merge consecutive alphanumerics into "type"
-        if current_action['action'] == 'press' and is_alphanumeric(current_action['value'][0]):
-            # Initialize typed string
-            typed_string = current_action['value'][0]
-            if typed_string == "Key.space":
-                typed_string = " "
-            typed_before_frame = current_action['before_frame']
-            typed_after_frame = current_action['after_frame']
-            j = i +1
-
-            while j < n:
-                next_action = actions[j]
-                if (next_action['action'] == 'press' and is_alphanumeric(next_action['value'][0]) and
-                    time_difference(current_action, next_action) <= 1.5):
-
-                    # Append character to typed string
-                    char = next_action['value'][0]
-                    if char == "Key.space":
-                        typed_string += " "
+                if next_action['action'] == 'vscroll':
+                    next_dy = next_action.get('dy', 0)
+                    if merged_dy * next_dy > 0:
+                        merged_dy += next_dy
+                        scroll_after_frame = next_action['after_frame']
+                        j += 1
                     else:
-                        typed_string += char
-                    typed_after_frame = next_action['after_frame']
-                    current_action = next_action
-                    j +=1
+                        break
                 else:
                     break
-
-            # Create typed string action
-            typed_action = {
-                "action": "typewrite",
+            processed_actions.append({
+                "action": "vscroll",
                 "button": None,
                 "x": None,
                 "y": None,
-                "n_scrolls": None,
-                "value": [typed_string],
-                "before_frame": typed_before_frame,
-                "after_frame": typed_after_frame
-            }
-            processed_actions.append(typed_action)
-            print(f"Merged actions from index {i} to {j-1} into type: '{typed_string}'.")
-
-            # Mark used images
-            used_image_paths.add(typed_before_frame)
-            used_image_paths.add(typed_after_frame)
-
+                "n_scrolls": merged_dy,
+                "value": [],
+                "before_frame": scroll_before_frame,
+                "after_frame": scroll_after_frame,
+            })
             i = j
             continue
 
-        # If none of the rules apply, keep the action as is and mark its images as used
-        current_action.pop('timestamp', None)  
+        # Rule 5: Merge eligible press/typewrite events if they are typable characters.
+        if current_action['action'] in {"press", "typewrite"} and is_typable_character(current_action['value'][0]):
+            # Skip if the current event is a shift key.
+            if current_action['value'][0].lower() in {"shift", "shift_l", "shift_r"}:
+                i += 1
+                continue
+            base_press = current_action.copy()  # copy the first event (base)
+            typed_string = base_press['value'][0]
+            if typed_string == "space":
+                typed_string = " "
+            typed_before_frame = base_press['before_frame']
+            # Instead of always comparing to the base_press, we now update a prev_event.
+            prev_event = base_press
+            last_after_frame = base_press['after_frame']
+            j = i + 1
+            merge_count = 0
+            while j < n:
+                next_action = actions[j]
+                if next_action['action'] in {"press", "typewrite"} and time_difference(prev_event, next_action) <= 1.5:
+                    key_val = next_action['value'][0]
+                    if key_val.lower() in {"shift", "shift_l", "shift_r"}:
+                        j += 1
+                        continue
+                    if is_typable_character(key_val):
+                        # Append the character; if it's "space", append a space.
+                        typed_string += key_val if key_val != "space" else " "
+                        last_after_frame = next_action['after_frame']
+                        merge_count += 1
+                        prev_event = next_action
+                        j += 1
+                    else:
+                        break
+                else:
+                    break
+            if merge_count == 0:
+                processed_actions.append(base_press)
+            else:
+                merged_event = {
+                    "action": "typewrite" if len(typed_string) > 1 else "press",
+                    "button": None,
+                    "x": None,
+                    "y": None,
+                    "n_scrolls": None,
+                    "value": [typed_string],
+                    "before_frame": typed_before_frame,
+                    "after_frame": last_after_frame
+                }
+                processed_actions.append(merged_event)
+            i = j
+            continue
+
+        # Default: Remove timestamp and append the event.
+        if current_action['action'] == 'press' and current_action['value'][0].lower() in {"shift", "shift_l", "shift_r"}:
+            i += 1
+            continue
+        current_action.pop('timestamp', None)
         processed_actions.append(current_action)
-        used_image_paths.add(current_action['before_frame'])
-        used_image_paths.add(current_action['after_frame'])
-        i +=1
+        i += 1
 
     return processed_actions
 
@@ -267,99 +253,81 @@ def merge_typewrite_actions(actions):
     merged_actions = []
     i = 0
     n = len(actions)
-
     while i < n:
         current_action = actions[i]
-
-        # Check if the current action is a typewrite action
         if current_action['action'] == 'typewrite':
-            # Initialize the merged value and set the start frame
             merged_value = current_action['value'][0]
-            before_frame = current_action['before_frame']
-            after_frame = current_action['after_frame']
-            
-            j = i + 1
-
-            # Merge consecutive typewrite actions
-            while j < n and actions[j]['action'] == 'typewrite':
-                merged_value += actions[j]['value'][0]
-                after_frame = actions[j]['after_frame']  # Update the end frame to the latest
-                j += 1
-
-            # Create the merged typewrite action
-            merged_typewrite_action = {
+            first_before = current_action['before_frame']
+            last_after = current_action['after_frame']
+            i += 1
+            while i < n and actions[i]['action'] == 'typewrite':
+                merged_value += actions[i]['value'][0]
+                last_after = actions[i]['after_frame']
+                i += 1
+            merged_actions.append({
                 "action": "typewrite",
                 "button": None,
                 "x": None,
                 "y": None,
                 "n_scrolls": None,
                 "value": [merged_value],
-                "before_frame": before_frame,
-                "after_frame": after_frame
-            }
-            merged_actions.append(merged_typewrite_action)
-
-            # Move to the next non-typewrite action
-            i = j
+                "before_frame": first_before,
+                "after_frame": last_after
+            })
         else:
-            # Append non-typewrite actions as is
             merged_actions.append(current_action)
             i += 1
-
     return merged_actions
 
-def delete_unused_images(original_actions, processed_actions):
-    # Collect all image paths from original actions
-    original_image_paths = set()
-    for action in original_actions:
-        if 'before_frame' in action and action['before_frame']:
-            original_image_paths.add(action['before_frame'])
-        if 'after_frame' in action and action['after_frame']:
-            original_image_paths.add(action['after_frame'])
-
-    # Collect all image paths used in processed actions
+def delete_unused_images(processed_actions, session_images_dir):
     used_image_paths = set()
     for action in processed_actions:
-        if 'before_frame' in action and action['before_frame']:
+        if action.get('before_frame'):
             used_image_paths.add(action['before_frame'])
-        if 'after_frame' in action and action['after_frame']:
+        if action.get('after_frame'):
             used_image_paths.add(action['after_frame'])
+    # Walk through the session images folder and delete any PNG file not referenced.
+    for root, dirs, files in os.walk(session_images_dir):
+        for file in files:
+            if file.lower().endswith(".png"):
+                full_path = os.path.join(root, file)
+                try:
+                    rel_path = Path(full_path).relative_to("data").as_posix()
+                except Exception:
+                    continue
+                if rel_path not in used_image_paths:
+                    try:
+                        os.remove(full_path)
+                        print(f"Deleted unused image: {full_path}")
+                    except Exception as e:
+                        print(f"Failed to delete {full_path}: {e}")
 
-    # Determine unused images
-    unused_image_paths = original_image_paths - used_image_paths
+def replace_typewrite_before_frames(processed_actions):
+    for idx in range(1, len(processed_actions)):
+        current_action = processed_actions[idx]
+        if current_action.get("action") == "typewrite":
+            prev_action = processed_actions[idx - 1]
+            if prev_action.get("after_frame"):
+                # Copy the previous action's after_frame to generate a new image file.
+                new_before = copy_image_file(prev_action["after_frame"])
+                current_action["before_frame"] = new_before
+    return processed_actions
 
-    # Delete unused images
-    for image_path in unused_image_paths:
-        if os.path.exists(image_path):
-            try:
-                os.remove(image_path)
-                print(f"Deleted unused image: {image_path}")
-            except Exception as e:
-                print(f"Failed to delete {image_path}: {e}")
-        else:
-            print(f"Image not found, skipping deletion: {image_path}")
 
-### Note: Only run this function for demonstration purposes
 def main_post_processing():
-    # Path to your annotations.json
     annotations_json_path = "data/2024-12-30-09-51-08/annotations/annotations.json"
-
-    # Load actions from JSON
     with open(annotations_json_path, 'r', encoding='utf-8') as f:
         original_actions = json.load(f)
-
-    # Process actions
     processed_actions = post_process_actions(original_actions)
-
-    # Save processed actions to a new JSON file
     processed_annotations_path = os.path.join(os.path.dirname(annotations_json_path), "processed_annotations.json")
     with open(processed_annotations_path, 'w', encoding='utf-8') as f:
         json.dump(processed_actions, f, indent=4)
-
     print(f"Post-processing complete. Processed annotations saved at: {processed_annotations_path}")
-
-    # Delete unused images
-    delete_unused_images(original_actions, processed_actions)
+    
+    # Determine the session folder as the parent of the annotations folder.
+    session_folder = os.path.dirname(os.path.dirname(annotations_json_path))
+    session_images_dir = os.path.join(session_folder, "images")
+    delete_unused_images(processed_actions, session_images_dir)
 
 if __name__ == "__main__":
     main_post_processing()
