@@ -42,13 +42,12 @@ def are_same_coordinates(action1, action2, delta=5):
 def time_difference(action1, action2):
     return action2['timestamp'] - action1['timestamp']
 
-# Helper function to copy an image file to a new file with a new UUID.
 def copy_image_file(rel_path):
     src = os.path.join("data", rel_path)
     p = Path(rel_path)
     session_id = p.stem.split("_")[0]
     new_uuid = uuid.uuid4().hex
-    new_filename = f"{session_id}_before_action_{new_uuid}{p.suffix}"
+    new_filename = f"{session_id}_before_{new_uuid}{p.suffix}"
     dst = p.parent / new_filename
     dst_full = os.path.join("data", str(dst))
     os.makedirs(os.path.join("data", str(p.parent)), exist_ok=True)
@@ -190,18 +189,16 @@ def post_process_actions(actions):
 
         # Rule 5: Merge eligible press/typewrite events if they are typable characters.
         if current_action['action'] in {"press", "typewrite"} and is_typable_character(current_action['value'][0]):
-            # Skip if the current event is a shift key.
             if current_action['value'][0].lower() in {"shift", "shift_l", "shift_r"}:
                 i += 1
                 continue
-            base_press = current_action.copy()  # copy the first event (base)
+            base_press = current_action.copy()
             typed_string = base_press['value'][0]
             if typed_string == "space":
                 typed_string = " "
             typed_before_frame = base_press['before_frame']
-            # Instead of always comparing to the base_press, we now update a prev_event.
-            prev_event = base_press
             last_after_frame = base_press['after_frame']
+            prev_event = base_press
             j = i + 1
             merge_count = 0
             while j < n:
@@ -212,7 +209,6 @@ def post_process_actions(actions):
                         j += 1
                         continue
                     if is_typable_character(key_val):
-                        # Append the character; if it's "space", append a space.
                         typed_string += key_val if key_val != "space" else " "
                         last_after_frame = next_action['after_frame']
                         merge_count += 1
@@ -223,6 +219,7 @@ def post_process_actions(actions):
                 else:
                     break
             if merge_count == 0:
+                base_press.pop('timestamp', None)
                 processed_actions.append(base_press)
             else:
                 merged_event = {
@@ -239,7 +236,6 @@ def post_process_actions(actions):
             i = j
             continue
 
-        # Default: Remove timestamp and append the event.
         if current_action['action'] == 'press' and current_action['value'][0].lower() in {"shift", "shift_l", "shift_r"}:
             i += 1
             continue
@@ -286,7 +282,6 @@ def delete_unused_images(processed_actions, session_images_dir):
             used_image_paths.add(action['before_frame'])
         if action.get('after_frame'):
             used_image_paths.add(action['after_frame'])
-    # Walk through the session images folder and delete any PNG file not referenced.
     for root, dirs, files in os.walk(session_images_dir):
         for file in files:
             if file.lower().endswith(".png"):
@@ -302,29 +297,32 @@ def delete_unused_images(processed_actions, session_images_dir):
                     except Exception as e:
                         print(f"Failed to delete {full_path}: {e}")
 
-def replace_typewrite_before_frames(processed_actions):
+def replace_all_before_frames(processed_actions):
+    """
+    For every action (except the first), replace its before_frame by copying the after_frame
+    of the previous action (with a new UUID). The new file becomes the before_frame.
+    """
     for idx in range(1, len(processed_actions)):
         current_action = processed_actions[idx]
-        if current_action.get("action") == "typewrite":
-            prev_action = processed_actions[idx - 1]
-            if prev_action.get("after_frame"):
-                # Copy the previous action's after_frame to generate a new image file.
-                new_before = copy_image_file(prev_action["after_frame"])
-                current_action["before_frame"] = new_before
+        prev_action = processed_actions[idx - 1]
+        if prev_action.get("after_frame"):
+            new_before = copy_image_file(prev_action["after_frame"])
+            current_action["before_frame"] = new_before
     return processed_actions
-
 
 def main_post_processing():
     annotations_json_path = "data/2024-12-30-09-51-08/annotations/annotations.json"
     with open(annotations_json_path, 'r', encoding='utf-8') as f:
         original_actions = json.load(f)
     processed_actions = post_process_actions(original_actions)
+    processed_actions = merge_typewrite_actions(processed_actions)
+    # Replace the before_frame of each action (not only typewrite) with a copy
+    # of the previous action's after_frame.
+    processed_actions = replace_all_before_frames(processed_actions)
     processed_annotations_path = os.path.join(os.path.dirname(annotations_json_path), "processed_annotations.json")
     with open(processed_annotations_path, 'w', encoding='utf-8') as f:
         json.dump(processed_actions, f, indent=4)
     print(f"Post-processing complete. Processed annotations saved at: {processed_annotations_path}")
-    
-    # Determine the session folder as the parent of the annotations folder.
     session_folder = os.path.dirname(os.path.dirname(annotations_json_path))
     session_images_dir = os.path.join(session_folder, "images")
     delete_unused_images(processed_actions, session_images_dir)
