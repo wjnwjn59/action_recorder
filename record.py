@@ -17,7 +17,7 @@ import win32con
 from pynput import mouse, keyboard
 
 from postprocess_annotations import post_process_actions, merge_typewrite_actions, delete_unused_images
-from postprocess_annotations import replace_typewrite_before_frames
+from postprocess_annotations import replace_all_before_frames
 
 import logging
 import string
@@ -50,6 +50,9 @@ start_time = time.time()
 
 executor = ThreadPoolExecutor(max_workers=4)
 
+# Global variable that holds the latest captured screenshot (as a relative path)
+last_frame = None
+
 def setup_directories():
     os.makedirs(base_dir, exist_ok=True)
     os.makedirs(images_dir, exist_ok=True)
@@ -69,25 +72,8 @@ def take_screenshot(label):
         raise
     return Path(filepath).relative_to("data").as_posix()
 
-def async_take_screenshot(label):
-    return executor.submit(take_screenshot, label)
-
-def distance(a, b):
-    return ((a[0] - b[0])**2 + (a[1] - b[1])**2)**0.5
-
-def is_typable_character(key):
-    # Return True if key is a single character (letter, digit, punctuation) or "space"
-    if key == "space":
-        return True
-    if len(key) == 1 and (key.isalnum() or key in string.punctuation):
-        return True
-    return False
-
-def attach_screenshot_callbacks(before_future, record, after_label, action_msg):
-    # Set delay based on action type:
-    # For drag and vscroll, delay = 0.3s.
-    # For press actions: if key is not "enter", delay = 0.1s; if "enter", delay = 1.0s.
-    # All others: delay = 1.0s.
+def attach_screenshot(record, after_label, action_msg):
+    # Set delay based on action type.
     if record.get("action") in ("drag", "vscroll"):
         delay = 0.3
     elif record.get("action") == "press":
@@ -98,29 +84,26 @@ def attach_screenshot_callbacks(before_future, record, after_label, action_msg):
     else:
         delay = 1.0
 
-    def callback(fut):
-        try:
-            # For press actions with typable characters, capture before screenshot synchronously.
-            if record.get("action") == "press" and is_typable_character(record.get("value", [""])[0]):
-                record["before_frame"] = take_screenshot("before_action")
-            else:
-                record["before_frame"] = fut.result()
-            time.sleep(delay)
-            after_future = async_take_screenshot(after_label)
-            record["after_frame"] = after_future.result()
-            actions.append(record)
-            logging.info(action_msg)
-        except Exception as e:
-            logging.error(f"Screenshot error: {e}")
-    before_future.add_done_callback(callback)
+    global last_frame
+    try:
+        # Use the global last_frame as the before_frame.
+        record["before_frame"] = last_frame
+        time.sleep(delay)
+        after_frame = take_screenshot(after_label)
+        record["after_frame"] = after_frame
+        # Update last_frame for the next action.
+        last_frame = after_frame
+        actions.append(record)
+        logging.info(action_msg)
+    except Exception as e:
+        logging.error(f"Screenshot error: {e}")
 
 def on_click(x, y, button, pressed):
     global is_mouse_pressed, drag_start_position
     if pressed:
         is_mouse_pressed = True
         drag_start_position = (x, y)
-        before_future = async_take_screenshot("before_action")
-        action_record = {
+        record = {
             "action": "single_click",
             "button": str(button).split(".")[1],
             "x": x,
@@ -131,14 +114,11 @@ def on_click(x, y, button, pressed):
             "before_frame": None,
             "after_frame": None
         }
-        attach_screenshot_callbacks(before_future, action_record, "after_action",
-                                    f"Single Click at ({x}, {y}) with {button}")
+        attach_screenshot(record, "after", f"Single Click at ({x}, {y}) with {button}")
     else:
         if is_mouse_pressed:
-            end_position = (x, y)
-            if distance(drag_start_position, end_position) > 5:
-                before_future = async_take_screenshot("before_action")
-                action_record = {
+            if ((drag_start_position[0] - x)**2 + (drag_start_position[1] - y)**2)**0.5 > 5:
+                record = {
                     "action": "drag",
                     "button": str(button).split(".")[1],
                     "x_start": drag_start_position[0],
@@ -149,15 +129,13 @@ def on_click(x, y, button, pressed):
                     "before_frame": None,
                     "after_frame": None
                 }
-                attach_screenshot_callbacks(before_future, action_record, "after_action",
-                                            f"Drag from {drag_start_position} to ({x}, {y})")
+                attach_screenshot(record, "after", f"Drag from {drag_start_position} to ({x}, {y})")
             else:
                 logging.info(f"Released at ({x}, {y}) with minimal movement")
             is_mouse_pressed = False
 
 def on_scroll(x, y, dx, dy):
-    before_future = async_take_screenshot("before_action")
-    action_record = {
+    record = {
         "action": "vscroll",
         "x": x,
         "y": y,
@@ -168,8 +146,7 @@ def on_scroll(x, y, dx, dy):
         "before_frame": None,
         "after_frame": None
     }
-    attach_screenshot_callbacks(before_future, action_record, "after_action",
-                                f"Scroll at ({x},{y}) dx={dx}, dy={dy}")
+    attach_screenshot(record, "after", f"Scroll at ({x},{y}) dx={dx}, dy={dy}")
 
 def on_move(x, y):
     pass
@@ -195,7 +172,6 @@ def on_press_key(key):
                 keyboard_listener.stop()
             return False
         else:
-            before_future = async_take_screenshot("before_key")
             if isinstance(key, keyboard.KeyCode):
                 if key.char is not None:
                     key_str = key.char.upper() if caps_lock_on else key.char
@@ -211,7 +187,7 @@ def on_press_key(key):
                 key_str = "ctrl"
             if key_str in ("alt_l", "alt_r"):
                 key_str = "alt"
-            action_record = {
+            record = {
                 "action": "press",
                 "button": None,
                 "x": None,
@@ -222,8 +198,7 @@ def on_press_key(key):
                 "before_frame": None,
                 "after_frame": None
             }
-            attach_screenshot_callbacks(before_future, action_record, "after_action",
-                                        f"Key Press: {key_str}")
+            attach_screenshot(record, "after", f"Key Press: {key_str}")
     except AttributeError:
         pass
 
@@ -262,13 +237,13 @@ def minimize_current_window():
     else:
         logging.info("No active window found.")
 
+def distance(a, b):
+    return ((a[0] - b[0])**2 + (a[1] - b[1])**2)**0.5
+
 def main():
-    global session_id, base_dir, images_dir, annotations_file_path, recording_path
+    global session_id, base_dir, images_dir, annotations_file_path, recording_path, last_frame
     parser = argparse.ArgumentParser(description="Mouse and Keyboard Recording Program")
-    parser.add_argument("--id", 
-                        type=str, 
-                        help="ID for folder naming and screenshot labeling",
-                        required=True)
+    parser.add_argument("--id", type=str, help="ID for folder naming and screenshot labeling", required=True)
     args = parser.parse_args()
     session_id = args.id
     base_dir = os.path.join("data", session_id)
@@ -280,6 +255,9 @@ def main():
         sys.exit(1)
     setup_directories()
     minimize_current_window()
+    # Capture an initial screenshot to be used as the before_frame for the first action.
+    time.sleep(1)
+    last_frame = take_screenshot("before")
     time.sleep(1)
     start_listeners()
     out = create_recording_writer()
@@ -290,7 +268,9 @@ def main():
     screen_recording_thread.result()
     post_processed_actions = post_process_actions(actions)
     post_processed_actions = merge_typewrite_actions(post_processed_actions)
-    post_processed_actions = replace_typewrite_before_frames(post_processed_actions)
+    # Replace the before_frame of each typewrite action (except the first) with a copy
+    # of the previous action's after_frame (with a new UUID).
+    post_processed_actions = replace_all_before_frames(post_processed_actions)
     with open(annotations_file_path, 'w', encoding='utf-8') as f:
         json.dump(post_processed_actions, f, indent=4)
     delete_unused_images(post_processed_actions, images_dir)
