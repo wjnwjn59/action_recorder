@@ -74,8 +74,8 @@ def take_screenshot(label):
 
 def attach_screenshot(record, after_label, action_msg):
     # Set delay based on action type.
-    if record.get("action") in ("drag", "vscroll", "single_click"):
-        delay = 0.5
+    if record.get("action") in ("drag", "vscroll"):
+        delay = 0.3
     elif record.get("action") == "press":
         if record.get("value") and record["value"][0].lower() != "enter":
             delay = 0.1
