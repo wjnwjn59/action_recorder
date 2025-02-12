@@ -80,9 +80,9 @@ def attach_screenshot(record, after_label, action_msg):
         if record.get("value") and record["value"][0].lower() != "enter":
             delay = 0.1
         else:
-            delay = 1.0
+            delay = 3.0
     else:
-        delay = 1.0
+        delay = 3.0
 
     global last_frame
     try:
